@@ -1,0 +1,7 @@
+fastai
+duckduckgo_search
+jupyter
+ipykernel
+beautifulsoup4
+msgspec
+pandas
