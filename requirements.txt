@@ -7,3 +7,6 @@ transformers[torch]
 datasets
 evaluate
 scikit-learn
+bitsandbytes
+peft
+accelerate
