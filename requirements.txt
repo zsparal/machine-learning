@@ -3,10 +3,11 @@ ipykernel
 beautifulsoup4
 msgspec
 pandas
-transformers[torch]
+transformers
 datasets
 evaluate
 scikit-learn
 bitsandbytes
 peft
 accelerate
+seaborn
