@@ -150,12 +150,12 @@ def load(
     one_hot_genres = base_df["genres"].str.join("|").str.get_dummies()
     df = pd.concat([base_df, one_hot_genres], axis=1)
 
-    # Prepare the metadata
-    metadata = create_metadata(df)
-
     train_df, eval_df = train_test_split(
         df, test_size=test_ratio, random_state=random_seed
     )
+
+    # Prepare the metadata
+    metadata = create_metadata(train_df)
 
     train = MultiLabelImageDataset(
         root=steam_games.parent,
