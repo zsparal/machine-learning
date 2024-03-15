@@ -4,7 +4,6 @@ beautifulsoup4
 msgspec
 pandas
 transformers
-datasets
 evaluate
 scikit-learn
 bitsandbytes

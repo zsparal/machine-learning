@@ -5,17 +5,19 @@ import msgspec
 
 SteamUrlType = Literal["app", "sub"]
 
+
 class SteamReview(msgspec.Struct):
     sentiment: str
     number_of_reviewers: int
     positive_percentage: int
+
 
 class SteamPageInformation(msgspec.Struct):
     type: Literal["game", "dlc", "package"]
 
     title: str
     description: Optional[str]
-    price: Optional[int|Literal["free"]]
+    price: Optional[int | Literal["free"]]
     images: list[str]
     genres: list[str]
     tags: list[str]
@@ -40,6 +42,7 @@ class UncrawledSteamGame(msgspec.Struct):
 
     def crawled_page_id(self) -> str:
         return f"{self.id}_{self.raw_name or 'Unknown'}"
+
 
 class SteamGame(msgspec.Struct):
     id: str
