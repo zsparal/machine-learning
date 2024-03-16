@@ -8,7 +8,7 @@ from typing import Iterable, Tuple, Optional, TypedDict
 from sklearn.model_selection import train_test_split
 
 from steam.game import SteamGame
-from steam.datasets import MultiLabelImageDataset, SplitDataset
+from steam.datasets import MultiLabelImageDataset, MultimodalDataset, SplitDataset
 from steam.utils import calculate_label_smoothing
 
 
@@ -22,14 +22,68 @@ class GenreClassificationMetadata:
     positive_label_threshold: float
 
 
-class DatasetColumns(TypedDict):
+@dataclass
+class GenreMultimodalMetadata:
+    labels: list[str]
+    genre_counts: pd.DataFrame
+
+
+class DatasetColumnsForClassification(TypedDict):
     id: str
     title: str
     image: str
     genres: list[str]
 
 
-def load(
+class DatasetColumnsForMultimodal(TypedDict):
+    id: str
+    title: str
+    image: str
+    genres: list[str]
+    text: str
+
+
+# We want to exclude certain genres from the Steam library. The main goal of this classification task is to distinguish
+# between games, not utilities or other software that found its way to Steam's library. Any entries that contain any of these
+# genres will be excluded later to improve the quality of the dataset for this task.
+excluded_genres = set(
+    [
+        "Accounting",
+        "Animation & Modeling",
+        "Audio Production",
+        "Design & Illustration",
+        "Education",
+        "Game Development",
+        "Movie",
+        "Photo Editing",
+        "Software Training",
+        "Utilities",
+        "Video Production",
+        "Web Publishing",
+    ]
+)
+
+
+def include_game_in_dataset(
+    game: SteamGame, top_n_by_popularity: Optional[int]
+) -> bool:
+    # If the game doesn't have any images we can't use it for an image classification task
+    if not game.page_information.images:
+        return False
+
+    # Only include games that are in the top N by popularity.
+    if top_n_by_popularity is not None and game.popularity_rank > top_n_by_popularity:
+        return False
+
+    # If the game doesn't have genre information then it doesn't make sense to try to classify it
+    if not game.page_information.genres:
+        return False
+
+    # Remove any games that are in the excluded genres
+    return all(genre not in excluded_genres for genre in game.page_information.genres)
+
+
+def load_for_classification(
     steam_games: Path,
     top_n_by_popularity: Optional[int] = None,
     label_smoothing: float = 0.1,
@@ -37,7 +91,8 @@ def load(
     random_seed: int = 42,
 ) -> Tuple[SplitDataset[MultiLabelImageDataset], GenreClassificationMetadata]:
     """
-    Load, preprocess and create datasets from the Steam games data for a genre classification task based on game images.
+    Load, preprocess and create datasets from the Steam games data for a genre classification task based on game images. This version
+    is meant to used for image-classification workloads.
 
     Parameters:
         steam_games: The path to the Steam games JSON file to load.
@@ -50,48 +105,7 @@ def load(
         A tuple containing the training and testing datasets along with metadata for genre classification.
     """
 
-    # We want to exclude certain genres from the Steam library. The main goal of this classification task is to distinguish
-    # between games, not utilities or other software that found its way to Steam's library. Any entries that contain any of these
-    # genres will be excluded later to improve the quality of the dataset for this task.
-    excluded_genres = set(
-        [
-            "Accounting",
-            "Animation & Modeling",
-            "Audio Production",
-            "Design & Illustration",
-            "Education",
-            "Game Development",
-            "Movie",
-            "Photo Editing",
-            "Software Training",
-            "Utilities",
-            "Video Production",
-            "Web Publishing",
-        ]
-    )
-
-    def include_game_in_dataset(game: SteamGame) -> bool:
-        # If the game doesn't have any images we can't use it for an image classification task
-        if not game.page_information.images:
-            return False
-
-        # Only include games that are in the top N by popularity.
-        if (
-            top_n_by_popularity is not None
-            and game.popularity_rank > top_n_by_popularity
-        ):
-            return False
-
-        # If the game doesn't have genre information then it doesn't make sense to try to classify it
-        if not game.page_information.genres:
-            return False
-
-        # Remove any games that are in the excluded genres
-        return all(
-            genre not in excluded_genres for genre in game.page_information.genres
-        )
-
-    def to_dataset_items(game: SteamGame) -> Iterable[DatasetColumns]:
+    def to_dataset_items(game: SteamGame) -> Iterable[DatasetColumnsForClassification]:
         return (
             {
                 "id": game.id,
@@ -142,7 +156,7 @@ def load(
     base_df = pd.DataFrame.from_records(
         record
         for game in all_games
-        if include_game_in_dataset(game)
+        if include_game_in_dataset(game, top_n_by_popularity=top_n_by_popularity)
         for record in to_dataset_items(game)
     )
 
@@ -169,6 +183,86 @@ def load(
         data=eval_df,
         num_labels=len(metadata.labels),
         label_smoothing=label_smoothing,
+    )
+
+    return {"train": train, "test": test}, metadata
+
+
+def load_for_multimodal(
+    steam_games: Path,
+    prompt_template: str,
+    top_n_by_popularity: Optional[int] = None,
+    test_ratio: float = 0.2,
+    random_seed: int = 42,
+) -> Tuple[SplitDataset[MultimodalDataset], GenreMultimodalMetadata]:
+    """
+    Load, preprocess and create datasets from the Steam games data for a genre classification task based on game images. This version
+    is meant to used for multimodal models, where explicit labels are not provided, only the expected genres for each game.
+
+    Parameters:
+        steam_games: The path to the Steam games JSON file to load.
+        prompt_templatate: The prompt template that the model will use. It should contain an <assistant> placeholder where the expected genres will be interpolated.
+        top_n_by_popularity: Number of top games by popularity to include. Useful for reducing dataset size, as the top entries on Steam tend to have better and more varied images as well.
+        test_ratio: Ratio of data to use for testing dataset.
+        random_seed: Random seed for reproducibility.
+
+    Returns:
+        A tuple containing the training and testing datasets along with metadata for genre classification.
+    """
+
+    def to_dataset_items(game: SteamGame) -> Iterable[DatasetColumnsForMultimodal]:
+        """
+        Creates a single record per image with the associated genres in the dataset. The genres are contained both as a list
+        for easy processing, and also a comma-separated string for use in the prompt. We also include spaces between the genres
+        so tokenization works better.
+        """
+        return (
+            {
+                "id": game.id,
+                "title": game.page_information.title,
+                "image": image,
+                "genres": game.page_information.genres,
+                "text": ", ".join(game.page_information.genres),
+            }
+            for image in game.page_information.images
+        )
+
+    def create_metadata(df: pd.DataFrame) -> GenreMultimodalMetadata:
+        labels = df.columns[4:].to_list()
+        genre_counts = df["genres"].explode().value_counts().reset_index()
+        return GenreMultimodalMetadata(
+            labels=labels,
+            genre_counts=genre_counts,
+        )
+
+    # Load the Steam games data
+    all_games = msgspec.json.decode(steam_games.read_text(), type=list[SteamGame])
+
+    # Flatten the data by creating one record per image with the associated genres
+    df = pd.DataFrame.from_records(
+        record
+        for game in all_games
+        if include_game_in_dataset(game, top_n_by_popularity=top_n_by_popularity)
+        for record in to_dataset_items(game)
+    )
+
+    train_df, eval_df = train_test_split(
+        df, test_size=test_ratio, random_state=random_seed
+    )
+
+    # Prepare the metadata
+    metadata = create_metadata(train_df)
+
+    train = MultimodalDataset(
+        root=steam_games.parent,
+        data=train_df,
+        prompt_template=prompt_template,
+    )
+
+    test = MultimodalDataset(
+        root=steam_games.parent,
+        data=eval_df,
+        prompt_template=prompt_template,
     )
 
     return {"train": train, "test": test}, metadata
